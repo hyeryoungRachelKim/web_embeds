@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400&display=swap" rel="stylesheet">
+<title>Obsidian Workshop — Motion Poster</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #e8e8e0; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; }
+  #wrap { width: clamp(375px, 95vw, 800px); background: #fbfbee; border-radius: 6px; padding: 0.2em; padding-bottom: 2em; }
+  canvas { display: block; width: 100%; height: auto; cursor: none; }
+  canvas.dragging { cursor: none; }
+  p { margin-top: 10px; font-size: 12px; color: #999; letter-spacing: 0.05em; text-align: center; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<p>드래그 → 밀어내기 &nbsp;|&nbsp; 별 클릭 → 버스트 &nbsp;|&nbsp; S키 → PNG 저장</p>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const W = 800, H = 1000;
+cv.width = W; cv.height = H;
+
+const MARGIN = 40;
+const LABEL_SIZE = 22, LABEL_TOP = 36;
+
+ctx.font = `700 130px Helvetica, Arial, sans-serif`;
+const dgW = ctx.measureText('DIGITAL GARDEN').width;
+const TITLE_FS = Math.floor(130 * (W - MARGIN * 2) / dgW);
+ctx.font = `700 ${TITLE_FS}px Helvetica, Arial, sans-serif`;
+const mm = ctx.measureText('H');
+const ASCENT  = mm.actualBoundingBoxAscent  || TITLE_FS * 0.72;
+const DESCENT = mm.actualBoundingBoxDescent || TITLE_FS * 0.1;
+const LABEL_BASE  = LABEL_TOP + LABEL_SIZE;
+const TITLE1_BASE = LABEL_BASE + 10 + ASCENT + TITLE_FS*0.2;
+const TITLE2_BASE = TITLE1_BASE + ASCENT + DESCENT;
+const HEADER_H    = Math.ceil(TITLE2_BASE + DESCENT + 20);
+
+const SQ_X = MARGIN, SQ_Y = HEADER_H;
+const SQ_W = W - MARGIN * 2, SQ_H = SQ_W;
+const URL_SIZE = 20, URL_TOP = SQ_Y + SQ_H + 14;
+
+const PAL      = ['#F78F79','#F1418C','#ECD969','#BFDF42','#9BEEEA','#800040'];
+const HUB_COL  = '#ECD969';
+const BG_CREAM = '#fbfbee', BG_SQ = '#0D0B35';
+const TYPES    = ['plus','star4','circle','cross','diamond','dot','ring'];
+
+let t = 0;
+function rnd(a,b){ return a + Math.random()*(b-a); }
+function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
+function sqX(p){ return SQ_X + SQ_W*p; }
+function sqY(p){ return SQ_Y + SQ_H*p; }
+
+// --- Perfect 5-point star ---
+function drawStar5(x,y,s,r){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(r - Math.PI/2);
+  ctx.beginPath();
+  for(let i=0;i<10;i++){
+    const a=(Math.PI*2/10)*i, rad=i%2===0?s:s*0.42;
+    i===0?ctx.moveTo(Math.cos(a)*rad,Math.sin(a)*rad):ctx.lineTo(Math.cos(a)*rad,Math.sin(a)*rad);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle='rgba(0,0,0,0.9)'; ctx.lineWidth=2; ctx.stroke();
+  ctx.restore();
+}
+
+// Hub defs — bx/by = base position, sz = size
+// Slow oscillation: each hub has drift params (period ~3s = 180 frames)
+// Size layout: zigzag row top (big, small, med, small), big bottom-left
+const BASE = 68;
+// z:1 = foreground yellow, z:0~0.3 = background dark/small
+const HUB_DEFS = [
+  // FOREGROUND — big yellow (초록 동그라미, z=1)
+  { x:0.20, y:0.22, sz:BASE,        z:1.0, dx:10, dy:8,  dph:0.0, dsp:1/720 },  // XL top-left
+  { x:0.18, y:0.68, sz:BASE*0.90,   z:1.0, dx:10, dy:9,  dph:1.7, dsp:1/740 },  // XL bottom-left — fills empty area
+  { x:0.70, y:0.32, sz:BASE*0.78,   z:1.0, dx:11, dy:10, dph:3.0, dsp:1/760 },  // XL right-mid (moved up)
+  { x:0.55, y:0.82, sz:BASE*0.65,   z:1.0, dx:10, dy:9,  dph:2.4, dsp:1/730 },  // XL bottom-center (new)
+  // BACKGROUND — small dark (보라 동그라미, z=0~0.3)
+  { x:0.55, y:0.12, sz:BASE*0.26,   z:0.2, dx:8,  dy:7,  dph:0.5, dsp:1/760 },  // XS top-center
+  { x:0.84, y:0.20, sz:BASE*0.20,   z:0.1, dx:7,  dy:6,  dph:3.2, dsp:1/780 },  // XS top-right
+  { x:0.42, y:0.38, sz:BASE*0.28,   z:0.25,dx:9,  dy:8,  dph:2.1, dsp:1/700 },  // XS center
+  { x:0.82, y:0.78, sz:BASE*0.22,   z:0.2, dx:8,  dy:9,  dph:1.9, dsp:1/720 },  // XS bottom-right
+  { x:0.50, y:0.82, sz:BASE*0.24,   z:0.15,dx:10, dy:7,  dph:0.9, dsp:1/750 },  // XS bottom-center
+  { x:0.30, y:0.90, sz:BASE*0.18,   z:0.1, dx:7,  dy:6,  dph:3.8, dsp:1/710 },  // XS bottom-left corner
+  { x:0.76, y:0.74, sz:BASE*0.58,   z:1.0, dx:10, dy:9,  dph:1.2, dsp:1/730 },  // XL right-bottom (new)
+];
+
+const HUBS = HUB_DEFS.map(def => ({
+  bx: sqX(def.x), by: sqY(def.y),
+  x:  sqX(def.x), y:  sqY(def.y),
+  sz: def.sz,
+  z:  def.z,
+  dx: def.dx, dy: def.dy,
+  dph: def.dph, dsp: def.dsp,
+  dph2: rnd(0,Math.PI*2),
+  ph: rnd(0,Math.PI*2), sp: rnd(0.18,0.42),
+  rp: rnd(0,Math.PI*2), rs: rnd(-0.004,0.004),
+  pulseOffset: rnd(0,Math.PI*2),
+  flickerTimer: 0,
+  haloRays: Array.from({length:16}, (_,j) => ({
+    baseAngle: (Math.PI*2/16)*j,
+    phaseOffset: rnd(0,Math.PI*2),
+    speed: rnd(0.5,1.0),
+    dashLen: rnd(10,24),
+  })),
+}));
+
+// draw back-to-front by z
+HUBS.sort((a,b) => a.z - b.z);
+
+// --- Ambient clusters ---
+const ambient = [];
+for(const hub of HUBS){
+  const iSzMin = Math.max(3, hub.sz*0.07);
+  const iSzMax = hub.sz*0.52;
+  const clusterR = hub.sz*5.5;
+  const count = Math.round(12 + hub.sz*1.1);
+  for(let i=0;i<count;i++){
+    const angle=rnd(0,Math.PI*2), dist=rnd(hub.sz*1.2, clusterR);
+    const bx=Math.max(SQ_X+5,Math.min(SQ_X+SQ_W-5, hub.bx+Math.cos(angle)*dist));
+    const by=Math.max(SQ_Y+5,Math.min(SQ_Y+SQ_H-5, hub.by+Math.sin(angle)*dist));
+    const isSp=Math.random()<0.1;
+    // orbit: each icon orbits its hub center very slowly
+    const orbitDist = Math.hypot(bx-hub.bx, by-hub.by);
+    const orbitAngle0 = Math.atan2(by-hub.by, bx-hub.bx);
+    // orbit speed: very slow, farther icons slightly slower
+    const orbitSpd = (0.00012 + rnd(0,0.00008)) / (1 + orbitDist*0.003);
+    // slight ellipse: scale x/y orbit axes a little differently
+    const orbitEx = rnd(0.85,1.0), orbitEy = rnd(0.85,1.0);
+    ambient.push({
+      bx,by,x:bx,y:by,vx:0,vy:0,
+      // orbit center = hub base position (hub moves too, tracked live)
+      hub,
+      orbitDist, orbitAngle0, orbitSpd, orbitEx, orbitEy,
+      type:isSp?'sprinkle':pick(TYPES), col:isSp?'#FFFFFF':pick(PAL),
+      sz:rnd(iSzMin,iSzMax), hubSz:hub.sz,
+      ph:rnd(0,Math.PI*2),ph2:rnd(0,Math.PI*2),ph3:rnd(0,Math.PI*2),
+      fx:rnd(0.001,0.003),fy:rnd(0.001,0.003),
+      ax:rnd(3,8)*(hub.sz/BASE), ay:rnd(2,6)*(hub.sz/BASE),
+      rp:rnd(0,Math.PI*2),rs:rnd(-0.005,0.005),
+    });
+  }
+}
+
+// --- Particles ---
+const particles=[];
+function spawnBurst(hx,hy,hub){
+  hub.flickerTimer=20;
+  for(let i=0;i<26+Math.floor(Math.random()*8);i++){
+    const angle=Math.random()*Math.PI*2,speed=3.5+Math.random()*7;
+    const isSp=Math.random()<0.28;
+    particles.push({
+      x:hx,y:hy,vx:Math.cos(angle)*speed,vy:Math.sin(angle)*speed-rnd(1.5,4),
+      gravity:rnd(0.1,0.22),type:isSp?'sprinkle':pick(TYPES),col:isSp?'#FFFFFF':pick(PAL),
+      sz:rnd(7,28),rp:rnd(0,Math.PI*2),rs:rnd(-0.09,0.09),
+      life:1.0,decay:rnd(0.005,0.011),friction:rnd(0.984,0.997),
+    });
+  }
+}
+
+// --- Stroke + primitives ---
+function s2(){ ctx.strokeStyle='rgba(0,0,0,0.9)';ctx.lineWidth=2;ctx.stroke(); }
+function plusPath(s,th){ const h=th/2;ctx.beginPath();ctx.moveTo(-h,-s);ctx.lineTo(h,-s);ctx.lineTo(h,-h);ctx.lineTo(s,-h);ctx.lineTo(s,h);ctx.lineTo(h,h);ctx.lineTo(h,s);ctx.lineTo(-h,s);ctx.lineTo(-h,h);ctx.lineTo(-s,h);ctx.lineTo(-s,-h);ctx.lineTo(-h,-h);ctx.closePath(); }
+function drawPlus(x,y,s,r){
+  const PLUS_PAL=['#FFFFFF','#FFFFFF','#F78F79','#ECD969','#9BEEEA','#800040'];
+  const col=PLUS_PAL[Math.floor(Math.abs(Math.sin(x*0.13+y*0.09))*PLUS_PAL.length)];
+  ctx.save();ctx.translate(x,y);ctx.rotate(r);plusPath(s,s*0.52);
+  ctx.fillStyle=col;ctx.fill();s2();ctx.restore();
+}
+function drawCross(x,y,s,r){ ctx.save();ctx.translate(x,y);ctx.rotate(r+Math.PI/4);plusPath(s,s*0.52);ctx.fill();s2();ctx.restore(); }
+function drawStar4(x,y,s,r){ ctx.save();ctx.translate(x,y);ctx.rotate(r);ctx.beginPath();for(let i=0;i<8;i++){const a=Math.PI*2/8*i,rad=i%2===0?s:s*0.25;i===0?ctx.moveTo(Math.cos(a)*rad,Math.sin(a)*rad):ctx.lineTo(Math.cos(a)*rad,Math.sin(a)*rad);}ctx.closePath();ctx.fill();s2();ctx.restore(); }
+function drawDiamond(x,y,s,r){ ctx.save();ctx.translate(x,y);ctx.rotate(r);ctx.beginPath();ctx.moveTo(0,-s);ctx.lineTo(s*0.35,0);ctx.lineTo(0,s);ctx.lineTo(-s*0.35,0);ctx.closePath();ctx.fill();s2();ctx.restore(); }
+function drawCircle(x,y,s){
+  const CCOLS=['#BFDF42','#F1418C','#800040','#ECD969','#FFFFFF'];
+  // each circle cycles through colors at its own speed based on position
+  const spd=0.00018;
+  const raw=(t*spd+(x*0.05+y*0.03))%(CCOLS.length);
+  const i=Math.floor(raw), next=(i+1)%CCOLS.length;
+  const frac=raw-i;
+  // lerp between two colors
+  function hex2r(h){return[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
+  const [r1,g1,b1]=hex2r(CCOLS[i]), [r2,g2,b2]=hex2r(CCOLS[next]);
+  const r=Math.round(r1+(r2-r1)*frac), g=Math.round(g1+(g2-g1)*frac), b=Math.round(b1+(b2-b1)*frac);
+  ctx.save();ctx.fillStyle=`rgb(${r},${g},${b})`;
+  ctx.beginPath();ctx.arc(x,y,s,0,Math.PI*2);ctx.fill();s2();
+  ctx.restore();
+}
+function drawDot(x,y,s){ ctx.beginPath();ctx.arc(x,y,s*0.42,0,Math.PI*2);ctx.fill();s2(); }
+function drawRing(x,y,s){
+  const RING_PAL=['#0B7197','#0B7197','#0B7197','#F78F79','#F1418C','#BFDF42'];
+  const col=RING_PAL[Math.floor(Math.abs(Math.sin(x*0.1+y*0.07))*RING_PAL.length)];
+  ctx.save();ctx.fillStyle=col;
+  ctx.beginPath();ctx.arc(x,y,s,0,Math.PI*2);ctx.arc(x,y,s*0.52,0,Math.PI*2,true);ctx.fill();
+  ctx.strokeStyle='rgba(0,0,0,0.9)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(x,y,s,0,Math.PI*2);ctx.stroke();
+  ctx.beginPath();ctx.arc(x,y,s*0.52,0,Math.PI*2);ctx.stroke();
+  ctx.restore();
+}
+function drawSprinkle(x,y,s,r){ ctx.save();ctx.translate(x,y);ctx.rotate(r);ctx.beginPath();ctx.rect(-s*0.14,-s*0.55,s*0.28,s*1.1);ctx.fill();ctx.restore(); }
+function drawAny(type,x,y,s,r){
+  switch(type){
+    case 'plus':     drawPlus(x,y,s,r);    break;
+    case 'star4':    drawStar4(x,y,s,r);   break;
+    case 'circle':   drawCircle(x,y,s);    break;
+    case 'cross':    drawCross(x,y,s,r);   break;
+    case 'diamond':  drawDiamond(x,y,s,r); break;
+    case 'dot':      drawDot(x,y,s);       break;
+    case 'ring':     drawRing(x,y,s);      break;
+    case 'sprinkle': drawSprinkle(x,y,s,r);break;
+  }
+}
+
+function drawHalo(hub){
+  const maxDist=hub.sz*3.8+30,minDist=hub.sz+5;
+  for(const ray of hub.haloRays){
+    const rawT=(t*ray.speed*0.008+ray.phaseOffset)%(Math.PI*2);
+    const prog=(Math.sin(rawT)+1)/2;
+    const dist=minDist+(maxDist-minDist)*prog;
+    const alpha=Math.sin(prog*Math.PI)*0.8;
+    const angle=ray.baseAngle+Math.sin(t*0.004+ray.phaseOffset)*0.07;
+    const cx=hub.x+Math.cos(angle)*dist,cy=hub.y+Math.sin(angle)*dist;
+    ctx.save();ctx.globalAlpha=alpha;ctx.fillStyle='#FFFFFF';
+    ctx.translate(cx,cy);ctx.rotate(angle+Math.PI/2);
+    ctx.beginPath();ctx.rect(-ray.dashLen*0.11,-ray.dashLen*0.5,ray.dashLen*0.22,ray.dashLen);
+    ctx.fill();ctx.globalAlpha=1;ctx.restore();
+  }
+}
+
+function withSqClip(fn){ ctx.save();ctx.beginPath();ctx.rect(SQ_X,SQ_Y,SQ_W,SQ_H);ctx.clip();fn();ctx.restore(); }
+
+// --- Drag ---
+let isDragging=false,dragX=0,dragY=0;
+let cursorX=-999,cursorY=-999,cursorVisible=false;
+const trail=[];  // {x,y,age}
+function toCC(e){ const r=cv.getBoundingClientRect(),cx=(e.clientX??e.touches[0].clientX)-r.left,cy=(e.clientY??e.touches[0].clientY)-r.top;return[cx*(W/r.width),cy*(H/r.height)]; }
+cv.addEventListener('mousemove', e => {
+  const[cx,cy]=toCC(e); cursorX=cx; cursorY=cy; cursorVisible=true;
+  trail.push({x:cx, y:cy, age:0});
+  if(trail.length>40) trail.shift();
+});
+cv.addEventListener('mouseleave', () => { cursorVisible=false; });
+cv.addEventListener('mousedown',e=>{isDragging=true;cv.classList.add('dragging');[dragX,dragY]=toCC(e);});
+cv.addEventListener('mousemove',e=>{if(!isDragging)return;[dragX,dragY]=toCC(e);});
+cv.addEventListener('mouseup',e=>{
+  if(!isDragging)return;isDragging=false;cv.classList.remove('dragging');
+  const[mx,my]=toCC(e);
+  if(my>=SQ_Y&&my<=SQ_Y+SQ_H&&mx>=SQ_X&&mx<=SQ_X+SQ_W){
+    let hit=false;
+    for(const hub of HUBS){if(Math.hypot(mx-hub.x,my-hub.y)<hub.sz+24){spawnBurst(hub.x,hub.y,hub);hit=true;}}
+    if(!hit){let c=HUBS[0],md=Infinity;for(const hub of HUBS){const d=Math.hypot(mx-hub.x,my-hub.y);if(d<md){md=d;c=hub;}}spawnBurst(c.x,c.y,c);}
+  }
+});
+cv.addEventListener('mouseleave',()=>{isDragging=false;cv.classList.remove('dragging');});
+cv.addEventListener('touchstart',e=>{isDragging=true;[dragX,dragY]=toCC(e);},{passive:true});
+cv.addEventListener('touchmove',e=>{if(isDragging)[dragX,dragY]=toCC(e);},{passive:true});
+cv.addEventListener('touchend',()=>{isDragging=false;});
+document.addEventListener('keydown',e=>{if(e.key==='s'||e.key==='S'){const a=document.createElement('a');a.download='obsidian_workshop_poster.png';a.href=cv.toDataURL('image/png');a.click();}});
+
+function drawHeader(){
+  ctx.fillStyle=BG_CREAM;ctx.fillRect(0,0,W,HEADER_H);
+  ctx.fillStyle='#191919';
+  ctx.font=`${LABEL_SIZE}px Helvetica, Arial, sans-serif`;ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.fillText('ICA  A.I. & A.I.',MARGIN,LABEL_TOP);
+  ctx.textAlign='right';
+  ctx.fillText('2026.04.07', W-MARGIN, LABEL_TOP);
+  ctx.textAlign='left';
+  ctx.font=`700 ${TITLE_FS}px Helvetica, Arial, sans-serif`;ctx.textAlign='left';ctx.textBaseline='alphabetic';
+  ctx.fillStyle='#191919';
+  ctx.letterSpacing='-0.04em';
+  ctx.fillText('OBSIDIAN',MARGIN,TITLE1_BASE);
+  ctx.fillText('DIGITAL GARDEN',MARGIN,TITLE2_BASE);
+  ctx.letterSpacing='0em';
+}
+
+function loop(){
+  t++;
+
+  // Update hub positions — slow sine oscillation ~3s period (180f)
+  for(const hub of HUBS){
+    // independent x/y oscillation — dph gives x direction, dph2 gives y direction
+    // multiply by unique angle factor per hub so each moves differently
+    hub.x = hub.bx + Math.sin(t * hub.dsp * Math.PI*2 + hub.dph)               * hub.dx
+                   + Math.cos(t * hub.dsp * Math.PI*2 * 1.37 + hub.dph2 + 1.1) * hub.dx * 0.4;
+    hub.y = hub.by + Math.sin(t * hub.dsp * Math.PI*2 * 0.79 + hub.dph2)       * hub.dy
+                   + Math.cos(t * hub.dsp * Math.PI*2 * 1.61 + hub.dph  + 2.3) * hub.dy * 0.35;
+  }
+
+  // Repulsion
+  if(isDragging){
+    for(const sh of ambient){
+      const dx=sh.x-dragX,dy=sh.y-dragY,d=Math.sqrt(dx*dx+dy*dy);
+      if(d<130&&d>0.1){const f=7*(1-d/130);sh.vx+=(dx/d)*f;sh.vy+=(dy/d)*f;}
+    }
+  }
+  for(const sh of ambient){
+    sh.vx*=0.87;sh.vy*=0.87;
+    // slow orbit around hub center + tiny local wobble
+    const orbitA = sh.orbitAngle0 + t * sh.orbitSpd;
+    const wobX = Math.sin(sh.ph  + t*sh.fx)*sh.ax;
+    const wobY = Math.cos(sh.ph2 + t*sh.fy)*sh.ay;
+    sh.x = sh.hub.x + Math.cos(orbitA)*sh.orbitDist*sh.orbitEx + wobX + sh.vx;
+    sh.y = sh.hub.y + Math.sin(orbitA)*sh.orbitDist*sh.orbitEy + wobY + sh.vy;
+  }
+
+  ctx.fillStyle=BG_CREAM;ctx.fillRect(0,0,W,H);
+  drawHeader();
+  ctx.fillStyle=BG_SQ;ctx.fillRect(SQ_X,SQ_Y,SQ_W,SQ_H);
+
+  // Particles outside clip
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.vy+=p.gravity;p.vx*=p.friction;p.vy*=p.friction;
+    p.x+=p.vx;p.y+=p.vy;p.life-=p.decay;
+    if(p.life<=0||p.y>H+80){particles.splice(i,1);continue;}
+    const a=p.life<0.3?p.life/0.3:1.0;
+    const[r,g,b]=[parseInt(p.col.slice(1,3),16),parseInt(p.col.slice(3,5),16),parseInt(p.col.slice(5,7),16)];
+    ctx.fillStyle=`rgba(${r},${g},${b},${a})`;
+    drawAny(p.type,p.x,p.y,p.sz,p.rp+p.rs*t);
+  }
+
+  withSqClip(()=>{
+    const sorted=[...ambient].sort((a,b)=>a.hubSz-b.hubSz);
+    for(const sh of sorted){
+      ctx.fillStyle=sh.col;
+      drawAny(sh.type,sh.x,sh.y,sh.sz,sh.rp+sh.rs*t);
+    }
+
+    for(const hub of HUBS) drawHalo(hub);
+
+    for(const hub of HUBS){
+      // only draw expanding rings for foreground stars (z >= 0.7)
+      if(hub.z >= 0.7){
+        const RING_COLS=['#800040','#BFDF42','#F1418C','#FFFFFF'];
+        const STEPS = 6;
+        // fire once every ~10s (600f), burst lasts ~1.2s (72f)
+        const PERIOD = 480, BURST = 144;
+        const cycle = (t + Math.round(hub.pulseOffset*200)) % PERIOD;
+        if(cycle <= BURST){
+        const burstProg = cycle / BURST;
+        for(let ri=0;ri<4;ri++){
+          // stagger each ring within the burst
+          const ringDelay = ri * 0.18;
+          const rp = Math.max(0, Math.min(1, (burstProg - ringDelay) / (1 - ringDelay*3)));
+          if(rp <= 0) continue;
+          const prog = Math.floor(rp * STEPS) / STEPS;
+          const ringR = hub.sz*(1.2 + prog*9.0);
+          const alpha = (1 - prog) * 0.85;
+          if(alpha < 0.02) continue;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle = RING_COLS[ri % RING_COLS.length];
+          ctx.lineWidth = 5 * (1 - prog * 0.85);
+          ctx.translate(hub.x, hub.y);
+          ctx.rotate(hub.rp + hub.rs*t - Math.PI/2);
+          ctx.beginPath();
+          for(let i=0;i<10;i++){
+            const a=(Math.PI*2/10)*i, rad=i%2===0?ringR:ringR*0.42;
+            i===0?ctx.moveTo(Math.cos(a)*rad,Math.sin(a)*rad):ctx.lineTo(Math.cos(a)*rad,Math.sin(a)*rad);
+          }
+          ctx.closePath();
+          ctx.stroke();
+          ctx.globalAlpha=1;
+          ctx.restore();
+        }
+        } // end if(cycle <= BURST)
+      }
+
+      const pulse=0.90+0.12*Math.sin(hub.pulseOffset+t*hub.sp*0.02);
+      let col;
+      if(hub.flickerTimer>0){
+        hub.flickerTimer--;
+        col=(hub.flickerTimer%3<2)?'#FFFFFF':HUB_COL;
+      } else {
+        const r=Math.round(0x3a + (0xec-0x3a)*hub.z);
+        const g=Math.round(0x2a + (0xd9-0x2a)*hub.z);
+        const b=Math.round(0x0a + (0x69-0x0a)*hub.z);
+        col=`rgb(${r},${g},${b})`;
+      }
+      ctx.save();ctx.translate(hub.x,hub.y);ctx.scale(pulse,pulse);ctx.translate(-hub.x,-hub.y);
+      ctx.fillStyle=col;
+      drawStar5(hub.x,hub.y,hub.sz,hub.rp+hub.rs*t);
+      ctx.restore();
+    }
+  });
+
+  drawHeader();
+  ctx.save();
+  ctx.fillStyle='#191919';
+  ctx.font=`400 ${URL_SIZE}px 'Fira Sans', sans-serif`;
+  ctx.textAlign='right';
+  ctx.textBaseline='top';
+  ctx.fillText('garden.hyeryoungkim.work', W-MARGIN, URL_TOP);
+  ctx.restore();
+
+  // trail + cursor
+  for(let i=trail.length-1;i>=0;i--){
+    trail[i].age++;
+    if(trail[i].age>40){trail.splice(i,1);continue;}
+    const tp=1-(trail[i].age/40);  // 1→0
+    const tr=Math.max(1, 10*tp*0.5);  // shrink as it ages
+    ctx.save();
+    ctx.globalAlpha=tp*0.45;
+    ctx.fillStyle='#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(trail[i].x,trail[i].y,tr,0,Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha=1;
+    ctx.restore();
+  }
+  if(cursorVisible){
+    // fade when near edge of square
+    let alpha=1.0;
+    const edge=30;
+    const distLeft=cursorX-SQ_X, distRight=(SQ_X+SQ_W)-cursorX;
+    const distTop=cursorY-SQ_Y, distBot=(SQ_Y+SQ_H)-cursorY;
+    const minDist=Math.min(distLeft,distRight,distTop,distBot);
+    if(minDist<edge) alpha=Math.max(0,minDist/edge);
+    ctx.save();
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle='#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(cursorX,cursorY,10,0,Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha=1;
+    ctx.restore();
+  }
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
